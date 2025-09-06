@@ -18,9 +18,7 @@ class ConnectionDegree(str, Enum):
 
 
 class ExportFormat(str, Enum):
-    CSV = "csv"
     JSON = "json"
-    XLSX = "xlsx"
 
 
 class Contact(BaseModel):

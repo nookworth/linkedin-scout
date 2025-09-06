@@ -1,2 +1,0 @@
-[console_scripts]
-linkedin-scout = linkedin_scout.cli.main:app

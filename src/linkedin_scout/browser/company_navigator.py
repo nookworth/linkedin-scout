@@ -6,9 +6,18 @@ import asyncio
 from typing import List, Dict, Any, Optional
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 from linkedin_scout.types import BrowserConfig, Contact
+from linkedin_scout.utils.session_manager import SessionManager
+from linkedin_scout.utils.logging_config import get_logger, log_error_with_context
+from linkedin_scout.utils.error_handling import (
+    with_error_handling, 
+    with_retry, 
+    NavigationError, 
+    ExtractionError,
+    SafeAsyncContextManager
+)
 import logging
 
-logger = logging.getLogger(__name__)
+logger = get_logger("browser.company_navigator")
 
 
 class CompanyNavigator:
@@ -19,6 +28,7 @@ class CompanyNavigator:
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+        self.session_manager = SessionManager()
         
     async def __aenter__(self):
         """Async context manager entry"""
@@ -39,19 +49,22 @@ class CompanyNavigator:
             slow_mo=self.config.slow_mo
         )
         
-        # Create context with user data dir for session persistence
+        # Create context with session persistence
         context_options = {
             "viewport": {"width": 1920, "height": 1080},
             "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
         
-        if self.config.user_data_dir:
-            # Use persistent context for session persistence
+        # Check for existing session
+        storage_state_path = self.session_manager.get_storage_state_path()
+        if storage_state_path:
+            logger.info("Using existing LinkedIn session")
             self.context = await self.browser.new_context(
-                storage_state=self.config.user_data_dir,
+                storage_state=storage_state_path,
                 **context_options
             )
         else:
+            logger.info("Creating new browser context")
             self.context = await self.browser.new_context(**context_options)
             
         self.page = await self.context.new_page()
@@ -59,7 +72,15 @@ class CompanyNavigator:
         # Set default timeout
         self.page.set_default_timeout(self.config.timeout)
         
-        logger.info("Browser initialized successfully")
+        # Ensure LinkedIn login
+        login_success = await self.session_manager.ensure_linkedin_login(self.page)
+        if not login_success:
+            raise RuntimeError("Failed to authenticate with LinkedIn")
+        
+        # Save session state after successful login
+        await self.session_manager.save_storage_state(self.context)
+        
+        logger.info("Browser initialized successfully with LinkedIn authentication")
         
     async def close(self):
         """Clean up browser resources"""
@@ -72,10 +93,14 @@ class CompanyNavigator:
             
         logger.info("Browser closed")
         
+    @with_retry(max_attempts=3, exceptions=[NavigationError])
+    @with_error_handling(exceptions=[NavigationError], default_return=False)
     async def navigate_to_company_people(self, company_name: str) -> bool:
         """Navigate to a company's People page on LinkedIn"""
         if not self.page:
             raise RuntimeError("Browser not initialized. Use 'async with' or call start() first.")
+            
+        logger.info(f"Navigating to company people page: {company_name}")
             
         try:
             # First try direct company URL
@@ -96,8 +121,12 @@ class CompanyNavigator:
             return True
             
         except Exception as e:
-            logger.error(f"Failed to navigate to {company_name}: {e}")
-            return False
+            log_error_with_context(
+                logger, 
+                e, 
+                {"company_name": company_name, "function": "navigate_to_company_people"}
+            )
+            raise NavigationError(f"Failed to navigate to {company_name}: {str(e)}")
             
     async def _search_and_navigate_to_company(self, company_name: str) -> bool:
         """Search for company and navigate to people page"""
@@ -184,8 +213,10 @@ class CompanyNavigator:
             logger.error(f"Text search failed: {e}")
             return False
             
+    @with_error_handling(exceptions=[ExtractionError], default_return=[])
     async def extract_profiles(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Extract profile information from current people page"""
+        logger.info(f"Starting profile extraction with limit: {limit}")
         profiles = []
         
         try:
@@ -227,9 +258,14 @@ class CompanyNavigator:
                     continue
                     
         except Exception as e:
-            logger.error(f"Profile extraction failed: {e}")
+            log_error_with_context(
+                logger, 
+                e, 
+                {"limit": limit, "profiles_found": len(profiles), "function": "extract_profiles"}
+            )
+            raise ExtractionError(f"Profile extraction failed: {str(e)}")
             
-        logger.info(f"Extracted {len(profiles)} profiles")
+        logger.info(f"Successfully extracted {len(profiles)} profiles")
         return profiles
         
     async def _scroll_to_load_profiles(self, target_count: int):

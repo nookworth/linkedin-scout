@@ -3,7 +3,7 @@ Company Search Controller - Orchestrates company-based LinkedIn searches
 """
 
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from linkedin_scout.browser import CompanyNavigator
 from linkedin_scout.agents.search_agent import ProfileEvaluator
 from linkedin_scout.types import BrowserConfig, AIConfig, SearchCriteria, Contact
